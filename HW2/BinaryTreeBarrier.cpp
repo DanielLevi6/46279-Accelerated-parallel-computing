@@ -64,29 +64,3 @@ void BinaryTreeBarrier::barrier() {
 
 
 
-int main() {
-    int numThreads = 64;
-    BinaryTreeBarrier barrier(numThreads);
-    // Test the barrier
-    std::vector<std::thread> threads;
-    for (int i = 0; i < numThreads; ++i) {
-        threads.emplace_back([&barrier]() {
-            std::cout << "Thread " << std::this_thread::get_id() << " before barrier" << std::endl;
-            barrier.barrier();
-            std::cout << "Thread " << std::this_thread::get_id() << " after barrier" << std::endl;
-        });
-    }
-
-    for (auto& thread : threads)
-        thread.join();
-
-    return 0;
-}
-
-
-
-
-
-
-
-
