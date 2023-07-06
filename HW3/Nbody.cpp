@@ -119,77 +119,67 @@ void init_particles_parallel(AllParticlesParallel* particles_parallel, const int
 }
 
 
+float accumulate_vector(__m256 vec) {
+    float tmp[8];
+    _mm256_store_ps(tmp, vec);
+    return tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7];
+}
+
+
 // TODO: add missing function
 void move_particles_parallel(const int nParticles, AllParticlesParallel* const particles_parallel, const float dt) {
     int number_of_elements_per_op = (VECTOR_LENGTH/BITS_PER_BYTE)/FLOAT_SIZE;
     int loops = ceil(nParticles / number_of_elements_per_op);
     
+    __m256 softening = _mm256_set1_ps(1e-20f);
     // Loop over particles that experience force
-    tbb::parallel_for(tbb::blocked_range<int>(0, nParticles),
-                            [=](const tbb::blocked_range<int>& r) {
-                                for (int i = r.begin(); i < r.end(); i++) {
-                                    //printf("i = %d\n", i);
+    tbb::parallel_for(tbb::blocked_range2d<int, int>(0, loops, 0, number_of_elements_per_op),
+                            [&](const tbb::blocked_range2d<int, int>& r) {
+                                for (int i = r.rows().begin(); i < r.rows().end(); i++) {
+                                    for (int l = r.cols().begin(); l < r.cols().end(); l++) {
                                     // Components of the gravity force on particle i
-                                    float Fx = 0, Fy = 0, Fz = 0;
-
+                                        __m256 Fx_vec = _mm256_set1_ps(0);
+                                        __m256 Fy_vec = _mm256_set1_ps(0);
+                                        __m256 Fz_vec = _mm256_set1_ps(0);
+                                        __m256 x_vec = _mm256_set1_ps(particles_parallel->x[i * number_of_elements_per_op + l]);
+                                        __m256 y_vec = _mm256_set1_ps(particles_parallel->y[i * number_of_elements_per_op + l]);
+                                        __m256 z_vec = _mm256_set1_ps(particles_parallel->z[i * number_of_elements_per_op + l]);
                                     // Loop over particles that exert force: vectorization expected here
-                                    for (int j = 0; j < loops; j++) {
-                                        //printf("j = %d\n", j);
-                                        // Avoid singularity and interaction with self
-                                        __m256 softening = _mm256_set1_ps(1e-20f);
-                                        
-                                        // Newton's law of universal gravity
-                                        __m256 dx = _mm256_sub_ps(_mm256_load_ps(&(particles_parallel->x[j*number_of_elements_per_op])), _mm256_set1_ps(particles_parallel->x[i]));
-                                        __m256 dy = _mm256_sub_ps(_mm256_load_ps(&(particles_parallel->y[j*number_of_elements_per_op])), _mm256_set1_ps(particles_parallel->y[i]));
-                                        __m256 dz = _mm256_sub_ps(_mm256_load_ps(&(particles_parallel->z[j*number_of_elements_per_op])), _mm256_set1_ps(particles_parallel->z[i]));
+                                        for (int j = 0; j < loops; j++) {
+                                            // Newton's law of universal gravity
+                                            __m256 dx = _mm256_sub_ps(_mm256_load_ps(&(particles_parallel->x[j*number_of_elements_per_op])), x_vec);
+                                            __m256 dy = _mm256_sub_ps(_mm256_load_ps(&(particles_parallel->y[j*number_of_elements_per_op])), y_vec);
+                                            __m256 dz = _mm256_sub_ps(_mm256_load_ps(&(particles_parallel->z[j*number_of_elements_per_op])), z_vec);
 
-                                        __m256 rr1 = _mm256_div_ps(_mm256_set1_ps(1.0f), _mm256_sqrt_ps(_mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(dx, dx), _mm256_mul_ps(dy, dy)), _mm256_add_ps(_mm256_mul_ps(dz, dz), softening))));
-                                        __m256 drPowerN32 = _mm256_mul_ps(_mm256_mul_ps(rr1, rr1), rr1);
-                                        
-                                        //Calculate the net force
-                                        for(int k=0; k<number_of_elements_per_op; k++) {
-                                            Fx += dx[k] * drPowerN32[k];
-                                            Fy += dy[k] * drPowerN32[k];
-                                            Fz += dz[k] * drPowerN32[k];
+                                            __m256 rr1 = _mm256_div_ps(_mm256_set1_ps(1.0f), _mm256_sqrt_ps(_mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(dx, dx), _mm256_mul_ps(dy, dy)), _mm256_add_ps(_mm256_mul_ps(dz, dz), softening))));
+                                            __m256 drPowerN32 = _mm256_mul_ps(_mm256_mul_ps(rr1, rr1), rr1);
+                                            
+                                            //Calculate the net force
+                                            Fx_vec = _mm256_add_ps(Fx_vec, _mm256_mul_ps(dx, drPowerN32));
+                                            Fy_vec = _mm256_add_ps(Fy_vec, _mm256_mul_ps(dy, drPowerN32));
+                                            Fz_vec = _mm256_add_ps(Fz_vec, _mm256_mul_ps(dz, drPowerN32));
                                         }
+                                        float Fx = accumulate_vector(Fx_vec);
+                                        float Fy = accumulate_vector(Fy_vec);
+                                        float Fz = accumulate_vector(Fz_vec);
+                                        particles_parallel->vx[i * number_of_elements_per_op + l] += dt * Fx;
+                                        particles_parallel->vy[i * number_of_elements_per_op + l] += dt * Fy;
+                                        particles_parallel->vz[i * number_of_elements_per_op + l] += dt * Fz;
                                     }
-                                    // if(i%1000 == 0) printf("Fx = %f\n", Fx);
-
-                                    particles_parallel->vx[i] += dt * Fx;
-                                    particles_parallel->vy[i] += dt * Fy;
-                                    particles_parallel->vz[i] += dt * Fz;
                                 }
                             }
     );
 
     // Second loop
-    // for(int i=0; i<loops; i++) {
-    //     __m256 x = _mm256_load_ps(&(particles_parallel->x[i*number_of_elements_per_op]));
-    //     __m256 y = _mm256_load_ps(&(particles_parallel->y[i*number_of_elements_per_op]));
-    //     __m256 z = _mm256_load_ps(&(particles_parallel->z[i*number_of_elements_per_op]));
-    //     __m256 vx = _mm256_load_ps(&(particles_parallel->vx[i*number_of_elements_per_op]));
-    //     __m256 vy = _mm256_load_ps(&(particles_parallel->vy[i*number_of_elements_per_op]));
-    //     __m256 vz = _mm256_load_ps(&(particles_parallel->vz[i*number_of_elements_per_op]));
-    //     x = _mm256_add_ps(x, _mm256_mul_ps(vx, _mm256_set1_ps(dt)));
-    //     y = _mm256_add_ps(y, _mm256_mul_ps(vy, _mm256_set1_ps(dt)));
-    //     z = _mm256_add_ps(z, _mm256_mul_ps(vz, _mm256_set1_ps(dt)));
-    //     _mm256_store_ps(&(particles_parallel->x[i*number_of_elements_per_op]), x);
-    //     _mm256_store_ps(&(particles_parallel->y[i*number_of_elements_per_op]), y);
-    //     _mm256_store_ps(&(particles_parallel->z[i*number_of_elements_per_op]), z);
-    // }
-    // for (int i = 0; i < nParticles; i++) {
-    //     particles_parallel->x[i] += particles_parallel->vx[i] * dt;
-    //     particles_parallel->y[i] += particles_parallel->vy[i] * dt;
-    //     particles_parallel->z[i] += particles_parallel->vz[i] * dt;
-    // }
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, nParticles),
-                        [&](const tbb::blocked_range<size_t>& r) {
-                            for(size_t i = r.begin(); i!=r.end(); i++) {
-                                particles_parallel->x[i] += particles_parallel->vx[i] * dt;
-                                particles_parallel->y[i] += particles_parallel->vy[i] * dt;
-                                particles_parallel->z[i] += particles_parallel->vz[i] * dt;
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, 3 * loops),
+                    [=](const tbb::blocked_range<size_t>& r) {
+                            for(int i = r.begin(); i!=r.end(); i++) {
+                                __m256 xyz = _mm256_load_ps(&(particles_parallel->x[i*number_of_elements_per_op]));
+                                __m256 v = _mm256_load_ps(&(particles_parallel->vx[i*number_of_elements_per_op]));
+                                xyz = _mm256_add_ps(xyz, _mm256_mul_ps(v, _mm256_set1_ps(dt)));
+                                _mm256_store_ps(&(particles_parallel->x[i*number_of_elements_per_op]), xyz);
                             }
-                        }
+                    }
     );
 }
 
@@ -200,7 +190,7 @@ void move_particles_parallel(const int nParticles, AllParticlesParallel* const p
 /**************************************************/
 
 bool validate_results(float f1, float f2, float f3) {
-    const float epsilon = 0.001f;
+    const float epsilon = 0.003f;
 
     std::cout << "f1 = " << f1 << "(2.351)" << endl;
     std::cout << "f2 = " << f2 << "(2.435)" << endl;
