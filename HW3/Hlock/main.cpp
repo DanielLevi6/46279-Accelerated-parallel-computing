@@ -1,3 +1,6 @@
+/**
+ * Compilation command: g++ -std=c++11 -O3 -o Hlock ./Hlock.cpp ./Hlock.hpp ./main.cpp -lpthread
+*/
 #include "Hlock.hpp"
 
 void lock_task1(HierarchicalMutex& m1, HierarchicalMutex& m2, HierarchicalMutex& m3, HierarchicalMutex& m4, HierarchicalMutex& m5) {
